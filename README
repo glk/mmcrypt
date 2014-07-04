@@ -1,0 +1,85 @@
+mmcrypt -- password-based key derivation function.
+
+Interface supports arbitrary input parameters and arbitrary length
+output:
+ - mmcrypt_absorb(data) -- input data, may be called arbitrary number of
+   times with arguments like salt, password, service tag, secret salt,
+   etc;
+ - mmcrypt_stretch(iter, m, s) -- key stretch procedure;
+ - mmcrypt_squeeze() => key -- produce cryptographic key based on
+   current state, may be called arbitrary number of times.
+
+Two primitives are used: Duplex construction on top of 512-bit Keccak
+(as in SHA-3) and Galois field multiplication.
+
+Pseudo-code:
+sm, s1, s2 - Duplex constructions. s.Duplexing is stateful operation.
+
+MSB(A, N) -- get N most significant bits of A
+LSB(A, N) -- get N least significant bits of A
+
+mmcrypt_abosrb(data) --
+	sm.Duplexing(data)
+
+mmcrypt_squeeze() --
+	return sm.Duplexing(NULL)
+
+mmcrypt_stretch(iter, c, s) --
+	for i 0 to iter - 1
+		mmcrypt_stretch'(c, s)
+
+mmcrypt_stretch'(c, s) --
+	fcount = 0
+	s1.Duplexing(sm.Duplexing(NULL))
+	s2.Duplexing(sm.Duplexing(NULL))
+	/* Choose start position k0, should not be 0 */
+	k = k0 = MSB(sm.Duplexing(NULL), c * 2) | (1 << (c * 2 - 1));
+	/* Create T1 and T2 tables. */
+	/* Ti[[x]] := Ti[x / s][x % s] */
+	T1[[0]] = s1.Duplexing(NULL)
+	T2[[0]] = s2.Duplexing(NULL)
+	for i in 1 to 2^c * s - 1
+		T1[[i]] = s1.Duplexing(T2[[i - 1]])
+		T2[[i]] = s2.Duplexing(T1[[i - 1]])
+	/* Traverse all (T1[i], T2[j]) pairs. */
+	/* (T1[0], T2[0]) pair is skipped. */
+	do
+		/* Multiplication by primitive element in GF(2^(c * 2)) */
+		k = k (*) alpha
+		k1 = MSB(k, c)
+		k2 = LSB(k, c)
+		for i in 0 to s - 1
+			if MSB(T1[k1][0], c) != MSB(T2[k2][0], c)
+				feedback ^= T1[k1][i] ^ T2[k2][i]
+			/* Multiplication in GF(2^512) */
+			feedback = feedback (*) alpha
+			if ++fcount % MMCRYPT_FRATE == 0
+				feedback = sm.Duplexing(feedback)
+	while k != k0
+	sm.Duplexing(feedback)
+	swap s1, s2
+
+
+Notes:
+
+Always perform the same non data dependent sequence of operations, but
+start at position that depends on user provided data.
+
+Make memory access pattern unpredictable for cache hierarchy in order to
+achieve higher memory pressure.
+
+Duplex construction is equivalent to sponge construction (see
+Duplexing-sponge lemma in "Duplexing the sponge: single-pass
+authenticated encryption and other applications") with padded inputs.
+Sponge is SHA-3 in our case.
+
+Keccak authors suggest Sponge(password || {0}n) with large n as a
+password-based key derivation function (see "Cryptographic sponge
+functions").
+
+The problem may be reformulated as meet-in-the-middle attack:
+Find A = {(i, j)} such as MSB(H1(i), c) = MSB(H2(j), c).
+where H(i) requires i Keccak-f operations for known inputs. E.g. it
+gives us 2^(c-1) operations on average for H(i) calculation. The intent
+was to make known problem harder to solve by inducing extra computation
+overhead.
