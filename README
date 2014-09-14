@@ -25,6 +25,8 @@ mmcrypt_squeeze() --
 	return sm.Duplexing(NULL)
 
 mmcrypt_stretch(iter, c, s) --
+	/* Create 64-bit big-endian array with 8 elements */
+	sm.Duplexing((be64){MMCRYPT_FRATE, iter, c, s, 0, 0, 0, 0})
 	for i 0 to iter - 1
 		mmcrypt_stretch'(c, s)
 
@@ -32,8 +34,9 @@ mmcrypt_stretch'(c, s) --
 	fcount = 0
 	s1.Duplexing(sm.Duplexing(NULL))
 	s2.Duplexing(sm.Duplexing(NULL))
-	/* Choose start position k0, should not be 0 */
-	k = k0 = MSB(sm.Duplexing(NULL), c * 2) | (1 << (c * 2 - 1));
+	/* Choose start positions k[i], should not be 0 */
+	for i in 0 to s - 1
+		k[i] = MSB(sm.Duplexing(NULL), c * 2) | 1;
 	/* Create T1 and T2 tables. */
 	/* Ti[[x]] := Ti[x / s][x % s] */
 	T1[[0]] = s1.Duplexing(NULL)
@@ -41,21 +44,27 @@ mmcrypt_stretch'(c, s) --
 	for i in 1 to 2^c * s - 1
 		T1[[i]] = s1.Duplexing(T2[[i - 1]])
 		T2[[i]] = s2.Duplexing(T1[[i - 1]])
-	/* Traverse all (T1[i], T2[j]) pairs. */
+	/* Traverse all (T1[k1][i], T2[k2][i]) pairs. */
 	/* (T1[0], T2[0]) pair is skipped. */
+	k0 = k[0]
 	do
-		/* Multiplication by primitive element in GF(2^(c * 2)) */
-		k = k (*) alpha
-		k1 = MSB(k, c)
-		k2 = LSB(k, c)
 		for i in 0 to s - 1
-			if MSB(T1[k1][0], c) != MSB(T2[k2][0], c)
+			/* Multiplication in GF(2^(c * 2)) */
+			k[i] = k[i] (*) alpha
+			k1 = MSB(k[i], c)
+			k2 = LSB(k[i], c)
+			if MSB(T1[k1][i], c) != MSB(T2[k2][i], c)
 				feedback ^= T1[k1][i] ^ T2[k2][i]
 			/* Multiplication in GF(2^512) */
 			feedback = feedback (*) alpha
+			if MSB(feedback) == 1
+				tmp = (T1[k1][i] ^ T2[k2][i]) (*) alpha
+				T1[k1][(i + 1) % s] ^= tmp
+				T2[k2][(i + 1) % s] ^= tmp
+				swap T1[k1][(i + 1) % s], T2[k2][(i + 1) % s]
 			if ++fcount % MMCRYPT_FRATE == 0
 				feedback = sm.Duplexing(feedback)
-	while k != k0
+	while k[0] != k0
 	sm.Duplexing(feedback)
 	swap s1, s2
 
@@ -80,6 +89,4 @@ functions").
 The problem may be reformulated as meet-in-the-middle attack:
 Find A = {(i, j)} such as MSB(H1(i), c) = MSB(H2(j), c).
 where H(i) requires i Keccak-f operations for known inputs. E.g. it
-gives us 2^(c-1) operations on average for H(i) calculation. The intent
-was to make known problem harder to solve by inducing extra computation
-overhead.
+gives us 2^(c-1) operations on average for H(i) calculation.

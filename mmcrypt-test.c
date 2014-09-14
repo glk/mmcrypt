@@ -16,11 +16,13 @@
  * SUCH DAMAGE.
  */
 
+#include <sys/time.h>
 #include <err.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <libgen.h>
 
 #include "mmcrypt.h"
 
@@ -41,14 +43,52 @@ dump_hex(unsigned char *b, size_t blen)
 	return bhex;
 }
 
+static void
+benchmark_result(int iter, int c, int s,
+    struct timeval *tstart, struct timeval *tend)
+{
+	const uintmax_t cells = (uintmax_t)(1ULL << (c + 1)) * s;
+	const uintmax_t feedbacks = (uintmax_t)(1ULL << (2 * c)) * s /
+	    MMCRYPT_FEEDBACK_RATE;
+	const uintmax_t hashes = 1 + (4 + s + cells + feedbacks + 1) * iter;
+	const uintmax_t mem = cells * (512 / 8) + s * sizeof(uint64_t);
+        double t;
+
+        t = tend->tv_sec - tstart->tv_sec;
+        t += (double)(tend->tv_usec - tstart->tv_usec) / (double)1000000;
+	printf("mmcrypt(%d, %d, %d): %jd cells, %jd hashes: %jd KB, %lf sec\n",
+	    iter, c, s, cells, hashes, mem >> 10, t);
+}
 
 int
-main()
+main(int argc, char **argv)
 {
 	struct mmcrypt_ctx ctx;
+	struct timeval tstart, tend;
 	unsigned char k1[512 / 8];
 	unsigned char k2[512 / 8];
+	int iter = 1, c = 7, s = 337;
 	int rv = 0;
+
+	switch (argc) {
+	case 1:
+		break;
+	case 4:
+		s = atoi(argv[3]);
+		/* FALLTHROUGH */
+	case 3:
+		c = atoi(argv[2]);
+		/* FALLTHROUGH */
+	case 2:
+		iter = atoi(argv[1]);
+		if (iter != 0 && c != 0 && s != 0)
+			break;
+		/* FALLTHROUGH */
+	default:
+		fprintf(stderr, "usage: %s [iter] [c] [s]\n",
+		    basename(argv[0]));
+		return -1;
+	}
 
 	mmcrypt_init(&ctx);
 	rv |= mmcrypt_absorb(&ctx, "pepper", strlen("pepper"));
@@ -57,25 +97,24 @@ main()
 	rv |= mmcrypt_absorb(&ctx, "password", strlen("password"));
 	if (rv != 0)
 		errx(1, "mmcrypt_absorb failed");
-	rv |= mmcrypt_stretch(&ctx, 1, 11, 4);
+
+	gettimeofday(&tstart, NULL);
+	rv |= mmcrypt_stretch(&ctx, iter, c, s);
+	gettimeofday(&tend, NULL);
 	if (rv != 0)
 		errx(1, "mmcrypt_stretch failed");
+
 	rv |= mmcrypt_squeeze(&ctx, k1, sizeof(k1));
 	rv |= mmcrypt_squeeze(&ctx, k2, sizeof(k2));
 	if (rv != 0)
 		errx(1, "mmcrypt_squeeze failed");
-	printf("k1 = %s\n", dump_hex(k1, sizeof(k1)));
-	printf("k2 = %s\n", dump_hex(k2, sizeof(k2)));
 	mmcrypt_destroy(&ctx);
+	printf("mmcrypt(%d, %d, %d): k[0] = %s\n",
+	    iter, c, s, dump_hex(k1, sizeof(k1)));
+	printf("mmcrypt(%d, %d, %d): k[1] = %s\n",
+	    iter, c, s, dump_hex(k2, sizeof(k2)));
 
-	mmcrypt_init(&ctx);
-	rv |= mmcrypt_stretch(&ctx, 1, 1, 1);
-	if (rv != 0)
-		errx(1, "mmcrypt_stretch failed");
-	rv |= mmcrypt_squeeze(&ctx, k1, sizeof(k1));
-	if (rv != 0)
-		errx(1, "mmcrypt_squeeze failed");
-	printf("min k1 = %s\n", dump_hex(k1, sizeof(k1)));
+	benchmark_result(iter, c, s, &tstart, &tend);
 
 	return 0;
 }

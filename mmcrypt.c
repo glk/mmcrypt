@@ -25,20 +25,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mmcrypt.h"
-
 #ifdef MMCRYPT_DEBUG
 #include <stdio.h>
 #endif
 
-#define MMCRYPT_FRATE		65521
+#include "mmcrypt.h"
+
+#define L_BITS			(512)
+#define L_BYTES			(L_BITS / 8)
+#define L_QUADS			(L_BYTES / 8)
 
 #define GF_POL1(n, p1) \
 	(1ULL | (1ULL << p1))
 #define GF_POL3(n, p1, p2, p3) \
 	(1ULL | (1ULL << p1) | (1ULL << p2) | (1ULL << p3))
 #define GF_POL5(n, p1, p2, p3, p4, p5) \
-	(1ULL | (1ULL << p1) | (1ULL << p2) | (1ULL << p3) | (1ULL << p4) | (1ULL << p5))
+	(1ULL | (1ULL << p1) | (1ULL << p2) | (1ULL << p3) | \
+	    (1ULL << p4) | (1ULL << p5))
 
 static const uint64_t mmcrypt_gfpol[] =
 {
@@ -110,7 +113,7 @@ mmcrypt_squeeze(struct mmcrypt_ctx *ctx, void *key, size_t keylen)
 	return !!rv;
 }
 
-static uint64_t
+static inline uint64_t
 mmcrypt_gfmul(uint64_t x, uint64_t pol, uint64_t msb1)
 {
 	uint64_t carry;
@@ -120,7 +123,7 @@ mmcrypt_gfmul(uint64_t x, uint64_t pol, uint64_t msb1)
 	return (x ^ (pol & carry)) & (msb1 - 1);
 }
 
-static void
+static inline void
 mmcrypt_gfmul_512(uint64_t *x)
 {
 	// 512,8,5,2
@@ -136,115 +139,162 @@ mmcrypt_gfmul_512(uint64_t *x)
 	x[7] = (x[7] << 1) ^ ((-msb) & gf_512_pol);
 }
 
+#ifdef MMCRYPT_DEBUG
+static uintmax_t d_hit, d_miss, d_feedback, d_swap;
+#endif
+
+static inline void
+mmcrypt_mix(uint64_t *feedback, uint64_t xmask,
+    uint64_t *x1, uint64_t *x2,
+    uint64_t *y1, uint64_t *y2)
+{
+	uint64_t x[L_QUADS];
+	uint64_t xswap, xskip;
+	uint64_t t;
+	uint32_t j;
+
+	xskip = (x1[0] ^ x2[0]) & xmask;
+	xskip = -!!(int64_t)(xskip & xmask);
+	for (j = 0; j < L_QUADS; j++) {
+		x[j] = x1[j] ^ x2[j];
+		feedback[j] ^= x[j] & xskip;
+	}
+	mmcrypt_gfmul_512(feedback);
+	xswap = -(int64_t)(((uint8_t *)feedback)[0] >> 7);
+
+#ifdef MMCRYPT_DEBUG
+	if (xskip == 0) {
+		d_hit++;
+	} else {
+		d_miss++;
+	}
+	if (xswap != 0) {
+		d_swap++;
+	}
+	if (0 && xswap == 0) {
+		return;
+	}
+#endif
+
+	mmcrypt_gfmul_512(x);
+	for (j = 0; j < L_QUADS; j++) {
+		t = (y1[j] ^ y2[j] ^ x[j]) & xswap;
+		y1[j] ^= t;
+		y2[j] ^= t;
+	}
+}
+
 int
 mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 {
 	duplexState s1, s2, st;
-	const int lbits = 512;
-	const int lbytes = lbits / 8;
-	const int lbytes64 = lbytes / 8;
-	uint64_t feedback[lbytes64];
-	uint8_t x[lbytes];
-	uint64_t *t1, *t2, *x1, *x2;
-	uint64_t xmask, match;
-	uint64_t kpol, kmsb1, k0, k;
-	uint32_t kmask, k1, k2, fcount;
-	uint32_t sbytes, nsbytes;
-	uint32_t rv, i, j, n;
-
-#ifdef MMCRYPT_DEBUG
-	uintmax_t d_hit, d_miss, d_feedback;
-#endif
+	uint64_t feedback[L_QUADS];
+	uint64_t x[L_QUADS];
+	uint64_t *k, *t1, *t2, *x1, *x2;
+	uint64_t xmask;
+	uint64_t k0, kpol, kmsb1;
+	size_t nsbytes;
+	uint32_t kmask, ka, kb;
+	uint32_t feedback_count;
+	uint32_t i, n, rv;
 
 	if (iter < 1 || c < 1 || c > 31 || s < 1)
 		return 1;
 	n = 1 << c;
-	if ((uint64_t)n * s * lbytes * 2 >= SIZE_MAX)
+	if ((uint64_t)n * s * L_BYTES * 2 + s * sizeof(k[0]) >= SIZE_MAX)
 		return 1;
-	sbytes = s * lbytes;
-	nsbytes = n * sbytes;
+	nsbytes = n * s * L_BYTES;
 	rv  = InitDuplex(&s1, 576, 1024);
 	rv |= InitDuplex(&s2, 576, 1024);
 	if (rv != 0)
 		return 1;
-	t1 = malloc(nsbytes * 2);
-	if (t1 == NULL)
+	k = malloc(s * sizeof(k[0]) + nsbytes * 2);
+	if (k == NULL)
 		return 1;
-	t2 = t1 + nsbytes / 8;
+	t1 = &k[s];
+	t2 = &t1[nsbytes / sizeof(t1[0])];
 #ifdef MMCRYPT_DEBUG
-	printf("memory usage: %d kb\n", (nsbytes * 2) >> 10);
+	printf("memory usage: %zd kb\n",
+	    (s * sizeof(k[0]) + nsbytes * 2) >> 10);
 #endif
 	memset(feedback, 0, sizeof(feedback));
 	kpol = mmcrypt_gfpol[c];
-	xmask = htobe64(((uint64_t)-1ULL) << (64 - c));
+	kmsb1 = 1ULL << (c * 2);
 	kmask = (1 << c) - 1;
+	xmask = htobe64(((uint64_t)-1ULL) << (64 - c));
+	x[0] = htobe64(MMCRYPT_FEEDBACK_RATE);
+	x[1] = htobe64(iter);
+	x[2] = htobe64(c);
+	x[3] = htobe64(s);
+	x[4] = htobe64(0);
+	x[5] = htobe64(0);
+	x[6] = htobe64(0);
+	x[7] = htobe64(0);
+	Duplexing(&ctx->sm, (uint8_t *)x, L_BITS, NULL, 0);
 	for (; iter > 0; iter--) {
-		Duplexing(&ctx->sm, NULL, 0, x, lbits);
-		Duplexing(&s1, x, lbits, NULL, 0);
-		Duplexing(&ctx->sm, NULL, 0, x, lbits);
-		Duplexing(&s2, x, lbits, NULL, 0);
-		Duplexing(&ctx->sm, NULL, 0, (uint8_t *)&k0, 64);
-		k0 = be64toh(k0);
-		k0 = k0 >> (64 - c * 2);
-		kmsb1 = 1ULL << (c * 2);
-		k0 |= (kmsb1 >> 1);
-		fcount = 0;
 #ifdef MMCRYPT_DEBUG
-		d_hit = d_miss = d_feedback = 0;
+		d_hit = d_miss = d_swap = d_feedback = 0;
 #endif
-		Duplexing(&s1, NULL, 0, (uint8_t *)t1, lbits);
-		Duplexing(&s2, NULL, 0, (uint8_t *)t2, lbits);
-		for (x1 = t1 + lbytes64, x2 = t2 + lbytes64; x1 < t2; x1 += lbytes64, x2 += lbytes64) {
-			Duplexing(&s1, (uint8_t *)(x2 - lbytes64), lbits, (uint8_t *)x1, lbits);
-			Duplexing(&s2, (uint8_t *)(x1 - lbytes64), lbits, (uint8_t *)x2, lbits);
+		Duplexing(&ctx->sm, NULL, 0, (uint8_t *)x, L_BITS);
+		Duplexing(&s1, (uint8_t *)x, L_BITS, NULL, 0);
+		Duplexing(&ctx->sm, NULL, 0, (uint8_t *)x, L_BITS);
+		Duplexing(&s2, (uint8_t *)x, L_BITS, NULL, 0);
+		for (i = 0; i < s; i++) {
+			Duplexing(&ctx->sm, NULL, 0, (uint8_t *)&k[i], 64);
+			k[i] = be64toh(k[i]);
+			k[i] = k[i] >> (64 - c * 2);
+			k[i] |= 1;
 		}
-		k = k0;
+		feedback_count = 0;
+		Duplexing(&s1, NULL, 0, (uint8_t *)t1, L_BITS);
+		Duplexing(&s2, NULL, 0, (uint8_t *)t2, L_BITS);
+		for (x1 = t1 + L_QUADS, x2 = t2 + L_QUADS; x1 < t2;
+		    x1 += L_QUADS, x2 += L_QUADS) {
+			Duplexing(&s1, (uint8_t *)(x2 - L_QUADS), L_BITS,
+			    (uint8_t *)x1, L_BITS);
+			Duplexing(&s2, (uint8_t *)(x1 - L_QUADS), L_BITS,
+			    (uint8_t *)x2, L_BITS);
+		}
+		k0 = k[0];
 		do {
-			k = mmcrypt_gfmul(k, kpol, kmsb1);
-			k1 = (k >> c) & kmask;
-			k2 = k & kmask;
-			x1 = t1 + sbytes * k1 / 8;
-			x2 = t2 + sbytes * k2 / 8;
-			match = (x1[0] ^ x2[0]) & xmask;
-			match = -!!(int64_t)match;
-#ifdef MMCRYPT_DEBUG
-			if (match == 0) {
-				d_hit++;
-			} else {
-				d_miss++;
-			}
-#endif
-			for (i = 0; i < s; i++)
-			{
-				for (j = 0; j < lbytes64; j++) {
-					feedback[j] ^= (x1[j] ^ x2[j]) & match;
-				}
-				mmcrypt_gfmul_512(feedback);
-				if (++fcount == MMCRYPT_FRATE) {
-					Duplexing(&ctx->sm, (uint8_t *)feedback, lbits, (uint8_t *)feedback, lbits);
-					fcount = 0;
+			for (i = 0; i < s; i++) {
+				k[i] = mmcrypt_gfmul(k[i], kpol, kmsb1);
+				ka = (k[i] >> c) & kmask;
+				kb = k[i] & kmask;
+				mmcrypt_mix(feedback, xmask,
+				    &t1[(ka * s + i) * L_QUADS],
+				    &t2[(kb * s + i) * L_QUADS],
+				    &t1[(ka * s + (i + 1) % s) * L_QUADS],
+				    &t2[(kb * s + (i + 1) % s) * L_QUADS]);
+				if (++feedback_count == MMCRYPT_FEEDBACK_RATE) {
+					feedback_count = 0;
+					Duplexing(&ctx->sm,
+					    (uint8_t *)feedback, L_BITS,
+					    (uint8_t *)feedback, L_BITS);
 #ifdef MMCRYPT_DEBUG
 					d_feedback++;
 #endif
 				}
 			}
-		} while (k != k0);
+		} while (k0 != k[0]);
+		Duplexing(&ctx->sm, (uint8_t *)feedback, L_BITS, NULL, 0);
+		st = s1;
+		s1 = s2;
+		s2 = st;
 #ifdef MMCRYPT_DEBUG
-		printf("iteration (%d) complete: %ju feedbacks, %ju lookups: %ju misses (%.2lf%%), %ju hits (%.2lf%%).\n",
+		printf("iteration (%d) complete: %ju feedbacks, %ju lookups: "
+		    "%ju misses (%.2lf%%), %ju hits (%.2lf%%), %ju swaps\n",
 			-iter, d_feedback, d_miss + d_hit,
 			d_miss, (double)d_miss * 100 / (d_miss + d_hit),
-			d_hit, (double)d_hit * 100 / (d_miss + d_hit));
-		if (d_miss + d_hit != (1ULL << (c * 2)) - 1)
+			d_hit, (double)d_hit * 100 / (d_miss + d_hit),
+			d_swap);
+		if (d_miss + d_hit != ((1ULL << (c * 2)) - 1) * s)
 			abort();
 #endif
-		Duplexing(&ctx->sm, (uint8_t *)feedback, lbits, NULL, 0);
-		/* Swap s1 and s2. */
-		st = s2;
-		s2 = s1;
-		s1 = st;
 	}
-	memset(t1, 0, nsbytes * 2);
-	free(t1);
+	// TODO Use memset_s if available
+	memset(k, 0, s * sizeof(k[0]) + nsbytes * 2);
+	free(k);
 	memset(x, 0, sizeof(x));
 	memset(feedback, 0, sizeof(feedback));
 	memset(&s1, 0, sizeof(s1));

@@ -1,6 +1,6 @@
 all: mmcrypt-test
 
-CFLAGS?= -Wall -march=native -g -O2 -funroll-loops -fomit-frame-pointer
+CFLAGS?= -Wall -march=native -g -O2 -funroll-loops -fomit-frame-pointer -fno-strict-aliasing
 # CFLAGS?= -Wall -O0 -g
 
 ifdef DEBUG

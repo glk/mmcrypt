@@ -19,6 +19,8 @@
 #ifndef MMCRYPT_H_
 #define MMCRYPT_H_
 
+#define MMCRYPT_FEEDBACK_RATE	65521
+
 #include "KeccakNISTInterface.h"
 #include "KeccakDuplex.h"
 
