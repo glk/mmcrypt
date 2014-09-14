@@ -25,10 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef MMCRYPT_DEBUG
-#include <stdio.h>
-#endif
-
 #include "mmcrypt.h"
 
 #define L_BITS			(512)
@@ -139,10 +135,6 @@ mmcrypt_gfmul_512(uint64_t *x)
 	x[7] = (x[7] << 1) ^ ((-msb) & gf_512_pol);
 }
 
-#ifdef MMCRYPT_DEBUG
-static uintmax_t d_hit, d_miss, d_feedback, d_swap;
-#endif
-
 static inline void
 mmcrypt_mix(uint64_t *feedback, uint64_t xmask,
     uint64_t *x1, uint64_t *x2,
@@ -161,20 +153,6 @@ mmcrypt_mix(uint64_t *feedback, uint64_t xmask,
 	}
 	mmcrypt_gfmul_512(feedback);
 	xswap = -(int64_t)(((uint8_t *)feedback)[0] >> 7);
-
-#ifdef MMCRYPT_DEBUG
-	if (xskip == 0) {
-		d_hit++;
-	} else {
-		d_miss++;
-	}
-	if (xswap != 0) {
-		d_swap++;
-	}
-	if (0 && xswap == 0) {
-		return;
-	}
-#endif
 
 	mmcrypt_gfmul_512(x);
 	for (j = 0; j < L_QUADS; j++) {
@@ -213,10 +191,6 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 		return 1;
 	t1 = &k[s];
 	t2 = &t1[nsbytes / sizeof(t1[0])];
-#ifdef MMCRYPT_DEBUG
-	printf("memory usage: %zd kb\n",
-	    (s * sizeof(k[0]) + nsbytes * 2) >> 10);
-#endif
 	memset(feedback, 0, sizeof(feedback));
 	kpol = mmcrypt_gfpol[c];
 	kmsb1 = 1ULL << (c * 2);
@@ -232,9 +206,6 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 	x[7] = htobe64(0);
 	Duplexing(&ctx->sm, (uint8_t *)x, L_BITS, NULL, 0);
 	for (; iter > 0; iter--) {
-#ifdef MMCRYPT_DEBUG
-		d_hit = d_miss = d_swap = d_feedback = 0;
-#endif
 		Duplexing(&ctx->sm, NULL, 0, (uint8_t *)x, L_BITS);
 		Duplexing(&s1, (uint8_t *)x, L_BITS, NULL, 0);
 		Duplexing(&ctx->sm, NULL, 0, (uint8_t *)x, L_BITS);
@@ -271,9 +242,6 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 					Duplexing(&ctx->sm,
 					    (uint8_t *)feedback, L_BITS,
 					    (uint8_t *)feedback, L_BITS);
-#ifdef MMCRYPT_DEBUG
-					d_feedback++;
-#endif
 				}
 			}
 		} while (k0 != k[0]);
@@ -281,16 +249,6 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 		st = s1;
 		s1 = s2;
 		s2 = st;
-#ifdef MMCRYPT_DEBUG
-		printf("iteration (%d) complete: %ju feedbacks, %ju lookups: "
-		    "%ju misses (%.2lf%%), %ju hits (%.2lf%%), %ju swaps\n",
-			-iter, d_feedback, d_miss + d_hit,
-			d_miss, (double)d_miss * 100 / (d_miss + d_hit),
-			d_hit, (double)d_hit * 100 / (d_miss + d_hit),
-			d_swap);
-		if (d_miss + d_hit != ((1ULL << (c * 2)) - 1) * s)
-			abort();
-#endif
 	}
 	// TODO Use memset_s if available
 	memset(k, 0, s * sizeof(k[0]) + nsbytes * 2);
