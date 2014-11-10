@@ -17,6 +17,7 @@ sm, s1, s2 - Duplex constructions. s.Duplexing is stateful operation.
 
 MSB(A, N) -- get N most significant bits of A
 LSB(A, N) -- get N least significant bits of A
+LSB_WRAP(A, i) -- LSB(A, floor(log2(i))) + i - (2 ** floor(log2(i)))
 
 mmcrypt_abosrb(data) --
 	sm.Duplexing(data)
@@ -42,8 +43,10 @@ mmcrypt_stretch'(c, s) --
 	T1[[0]] = s1.Duplexing(NULL)
 	T2[[0]] = s2.Duplexing(NULL)
 	for i in 1 to 2^c * s - 1
-		T1[[i]] = s1.Duplexing(T2[[i - 1]])
-		T2[[i]] = s2.Duplexing(T1[[i - 1]])
+		j = LSB_WRAP(T2[[i - 1]], i)
+		T1[[i]] = s1.Duplexing(T2[[j]])
+		j = LSB_WRAP(T1[[i - 1]], i)
+		T2[[i]] = s2.Duplexing(T1[[j]])
 	/* Traverse all (T1[k1][i], T2[k2][i]) pairs. */
 	/* (T1[0], T2[0]) pair is skipped. */
 	k0 = k[0]

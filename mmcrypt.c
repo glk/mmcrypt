@@ -135,6 +135,18 @@ mmcrypt_gfmul_512(uint64_t *x)
 	x[7] = (x[7] << 1) ^ ((-msb) & gf_512_pol);
 }
 
+static inline uint32_t
+mmcrypt_wrap(uint64_t *x, uint32_t i, uint32_t imask)
+{
+	uint64_t a;
+	uint32_t w;
+
+	a = be64toh(x[L_QUADS - 1]);
+	w = a & imask;
+	w += i - imask - 1;
+	return w;
+}
+
 static inline void
 mmcrypt_mix(uint64_t *feedback, uint64_t xmask,
     uint64_t *x1, uint64_t *x2,
@@ -174,7 +186,7 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 	size_t nsbytes;
 	uint32_t kmask, ka, kb;
 	uint32_t feedback_count;
-	uint32_t i, n, rv;
+	uint32_t i, imask, n, rv;
 
 	if (iter < 1 || c < 1 || c > 31 || s < 1)
 		return 1;
@@ -219,11 +231,14 @@ mmcrypt_stretch(struct mmcrypt_ctx *ctx, uint32_t iter, uint32_t c, uint32_t s)
 		feedback_count = 0;
 		Duplexing(&s1, NULL, 0, (uint8_t *)t1, L_BITS);
 		Duplexing(&s2, NULL, 0, (uint8_t *)t2, L_BITS);
-		for (x1 = t1 + L_QUADS, x2 = t2 + L_QUADS; x1 < t2;
-		    x1 += L_QUADS, x2 += L_QUADS) {
-			Duplexing(&s1, (uint8_t *)(x2 - L_QUADS), L_BITS,
+		for (i = 1, imask = 0, x1 = t1 + L_QUADS, x2 = t2 + L_QUADS;
+		    x1 < t2; x1 += L_QUADS, x2 += L_QUADS, i++) {
+			imask |= i >> 1;
+			ka = mmcrypt_wrap(x2 - L_QUADS, i, imask);
+			kb = mmcrypt_wrap(x1 - L_QUADS, i, imask);
+			Duplexing(&s1, (uint8_t *)(t2 + ka * L_QUADS), L_BITS,
 			    (uint8_t *)x1, L_BITS);
-			Duplexing(&s2, (uint8_t *)(x1 - L_QUADS), L_BITS,
+			Duplexing(&s2, (uint8_t *)(t1 + kb * L_QUADS), L_BITS,
 			    (uint8_t *)x2, L_BITS);
 		}
 		k0 = k[0];
